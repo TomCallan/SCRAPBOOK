@@ -204,11 +204,24 @@ const AnnotationOverlay = ({ pageIdx, annotations, updateAnnotations, activeTool
   );
 };
 
+const BOOK_COLORS = [
+  'bg-stone-300',
+  'bg-red-400',
+  'bg-orange-400',
+  'bg-amber-400',
+  'bg-emerald-400',
+  'bg-cyan-400',
+  'bg-blue-400',
+  'bg-indigo-400',
+  'bg-fuchsia-400',
+  'bg-rose-400'
+];
+
 const App = () => {
   const [mode, setMode] = useState('edit');
   const [activeMobileTab, setActiveMobileTab] = useState('editor');
   
-  const [books, setBooks] = useState([{ id: 1, title: 'Untitled Scrapbook', markdown: '', assets: {}, annotations: {} }]);
+  const [books, setBooks] = useState([{ id: 1, title: 'Untitled Scrapbook', color: 'bg-stone-300', markdown: '', assets: {}, annotations: {} }]);
   const [activeBookId, setActiveBookId] = useState(1);
 
   const activeBook = books.find(b => b.id === activeBookId) || books[0];
@@ -237,6 +250,12 @@ const App = () => {
     }));
   };
 
+  const cycleColor = (bookId, currentColor) => {
+    const currentIndex = BOOK_COLORS.indexOf(currentColor || 'bg-stone-300');
+    const nextColor = BOOK_COLORS[(currentIndex + 1) % BOOK_COLORS.length];
+    setBooks(prev => prev.map(b => b.id === bookId ? { ...b, color: nextColor } : b));
+  };
+
   const [editingAsset, setEditingAsset] = useState(null);
   const [isDraggingOverEditor, setIsDraggingOverEditor] = useState(false);
   const [markedLoaded, setMarkedLoaded] = useState(false);
@@ -251,7 +270,13 @@ const App = () => {
   const [activeTool, setActiveTool] = useState('none');
   const [includeMarkup, setIncludeMarkup] = useState(true);
 
-  const [settings, setSettings] = useState({ apiKey: apiKey, enableVectorSearch: true });
+  const [settings, setSettings] = useState({ 
+    aiProvider: 'gemini', 
+    aiModel: 'gemini-2.5-flash-preview-09-2025',
+    geminiApiKey: apiKey, 
+    groqApiKey: '',
+    enableVectorSearch: true 
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -273,9 +298,9 @@ const App = () => {
 
   const getEmbedding = async (text) => {
     // If we have an API key, prefer Gemini
-    if (settings.apiKey) {
+    if (settings.aiProvider === 'gemini' && settings.geminiApiKey) {
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${settings.apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${settings.geminiApiKey}`;
         const payload = { model: "models/text-embedding-004", content: { parts: [{ text }] } };
         const response = await fetch(url, {
           method: 'POST',
@@ -304,20 +329,71 @@ const App = () => {
     return null;
   };
 
-  const callGemini = async (payload, retries = 5) => {
-    const key = settings.apiKey;
-    if (!key) throw new Error("API Key required. Please set it in Settings.");
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${key}`;
+  const callAI = async (payload, systemPrompt, imageBase64, mimeType, retries = 5) => {
+    if (settings.aiProvider === 'none') throw new Error("AI features are disabled in Settings.");
+
     for (let i = 0; i < retries; i++) {
       try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
-        const result = await response.json();
-        return result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (settings.aiProvider === 'gemini') {
+          if (!settings.geminiApiKey) throw new Error("Gemini API Key required.");
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${settings.aiModel || 'gemini-2.5-flash-preview-09-2025'}:generateContent?key=${settings.geminiApiKey}`;
+          
+          let geminiPayload = {};
+          if (imageBase64) {
+             geminiPayload = {
+               contents: [{ role: "user", parts: [{ text: payload }, { inlineData: { mimeType, data: imageBase64 } }] }],
+               generationConfig: { responseMimeType: "application/json" }
+             };
+          } else {
+             geminiPayload = {
+               contents: [{ parts: [{ text: payload }] }],
+               systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined
+             };
+          }
+
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(geminiPayload)
+          });
+          if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+          const result = await response.json();
+          return result.candidates?.[0]?.content?.parts?.[0]?.text;
+        } 
+        else if (settings.aiProvider === 'groq' || settings.aiProvider === 'local') {
+          const isLocal = settings.aiProvider === 'local';
+          if (!isLocal && !settings.groqApiKey) throw new Error("Groq API Key required.");
+          
+          const url = isLocal ? 'http://localhost:11434/v1/chat/completions' : 'https://api.groq.com/openai/v1/chat/completions';
+          const headers = { 'Content-Type': 'application/json' };
+          if (!isLocal) headers['Authorization'] = `Bearer ${settings.groqApiKey}`;
+
+          const messages = [];
+          if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+
+          if (imageBase64) {
+            messages.push({
+              role: 'user',
+              content: [
+                { type: "text", text: payload },
+                { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
+              ]
+            });
+          } else {
+            messages.push({ role: 'user', content: payload });
+          }
+
+          const openAiPayload = {
+            model: settings.aiModel || (isLocal ? 'llama3' : 'llama3-8b-8192'),
+            messages: messages,
+            response_format: imageBase64 ? { type: "json_object" } : undefined
+          };
+
+          const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(openAiPayload) });
+          if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+          const result = await response.json();
+          return result.choices?.[0]?.message?.content;
+        }
       } catch (err) {
         if (i === retries - 1) throw err;
         await new Promise(res => setTimeout(res, Math.pow(2, i) * 1000));
@@ -531,11 +607,7 @@ const App = () => {
       });
       const mimeType = blob.type;
       const prompt = "Analyze this photo for a visa application evidence booklet. Suggest a formal caption (max 15 words), a likely date (if visible or inferable), and a location. Format your response strictly as JSON with keys: 'caption', 'date', 'location'.";
-      const payload = {
-        contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Data } }] }],
-        generationConfig: { responseMimeType: "application/json" }
-      };
-      const responseText = await callGemini(payload);
+      const responseText = await callAI(prompt, null, base64Data, mimeType);
       const parsed = JSON.parse(responseText);
       setAssets(prev => ({
         ...prev,
@@ -554,11 +626,7 @@ const App = () => {
     setAIError(null);
     try {
       const systemPrompt = "You are a professional immigration assistant. Improve the user's markdown narrative to sound formal, organized, and persuasive for a CR1 visa application. Maintain the original structure and standard Markdown syntax. Output ONLY improved markdown.";
-      const payload = {
-        contents: [{ parts: [{ text: markdown }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] }
-      };
-      const improved = await callGemini(payload);
+      const improved = await callAI(markdown, systemPrompt, null, null);
       if (improved) setMarkdown(improved);
     } catch (err) {
       setAIError("Failed to polish narrative.");
@@ -1006,7 +1074,7 @@ const App = () => {
               <button 
                 onClick={() => {
                   const newId = Date.now();
-                  setBooks(prev => [...prev, { id: newId, title: `Scrapbook ${prev.length + 1}`, markdown: '', assets: {}, annotations: {} }]);
+                  setBooks(prev => [...prev, { id: newId, title: `Scrapbook ${prev.length + 1}`, color: 'bg-stone-300', markdown: '', assets: {}, annotations: {} }]);
                   setActiveBookId(newId);
                 }}
                 className="p-1 hover:bg-stone-200 rounded text-stone-600"
@@ -1019,6 +1087,10 @@ const App = () => {
               {books.map(book => (
                 <div key={book.id} className={`group flex items-center justify-between p-2 rounded-md transition-colors text-sm cursor-pointer ${activeBookId === book.id ? 'bg-white shadow-sm font-bold text-stone-900 border border-stone-200' : 'hover:bg-stone-200/50 text-stone-600'}`} onClick={() => setActiveBookId(book.id)}>
                   <div className="flex items-center gap-2 truncate">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); cycleColor(book.id, book.color); }}
+                      className={`w-3 h-3 rounded-full shrink-0 ${book.color || 'bg-stone-300'} border border-black/10 hover:scale-110 transition-transform`}
+                    />
                     <Book size={14} className={activeBookId === book.id ? "text-stone-800" : "text-stone-400"} />
                     <span className="truncate">{book.title}</span>
                   </div>
@@ -1228,16 +1300,59 @@ const App = () => {
             </div>
             <div className="space-y-6">
               <div>
-                <label className="block text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2">Gemini API Key</label>
-                <input 
-                  type="password" 
-                  value={settings.apiKey} 
-                  onChange={e => setSettings({...settings, apiKey: e.target.value})} 
-                  placeholder="Paste AI key here..." 
-                  className="w-full p-2.5 border border-stone-200 rounded-lg outline-none focus:ring-2 focus:ring-stone-400 text-sm shadow-inner bg-stone-50" 
-                />
-                <p className="text-xs text-stone-400 mt-2 font-medium">Required for Magic Polish, Smart Import, and Concept Vector Search.</p>
+                <label className="block text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2">AI Provider</label>
+                <select 
+                  value={settings.aiProvider} 
+                  onChange={e => setSettings({...settings, aiProvider: e.target.value})} 
+                  className="w-full p-2.5 border border-stone-200 rounded-lg outline-none focus:ring-2 focus:ring-stone-400 text-sm shadow-inner bg-stone-50"
+                >
+                  <option value="none">None</option>
+                  <option value="local">Local (Ollama)</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="groq">Groq</option>
+                </select>
               </div>
+
+              {settings.aiProvider !== 'none' && (
+                <div>
+                  <label className="block text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2">Model Name</label>
+                  <input 
+                    type="text" 
+                    value={settings.aiModel} 
+                    onChange={e => setSettings({...settings, aiModel: e.target.value})} 
+                    placeholder="e.g. llama3-8b-8192 or gemini-2.5-flash-preview-09-2025" 
+                    className="w-full p-2.5 border border-stone-200 rounded-lg outline-none focus:ring-2 focus:ring-stone-400 text-sm shadow-inner bg-stone-50" 
+                  />
+                </div>
+              )}
+
+              {settings.aiProvider === 'gemini' && (
+                <div>
+                  <label className="block text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2">Gemini API Key</label>
+                  <input 
+                    type="password" 
+                    value={settings.geminiApiKey} 
+                    onChange={e => setSettings({...settings, geminiApiKey: e.target.value})} 
+                    placeholder="Paste Gemini AI key here..." 
+                    className="w-full p-2.5 border border-stone-200 rounded-lg outline-none focus:ring-2 focus:ring-stone-400 text-sm shadow-inner bg-stone-50" 
+                  />
+                  <p className="text-xs text-stone-400 mt-2 font-medium">Required for Magic Polish, Smart Import, and Concept Vector Search.</p>
+                </div>
+              )}
+
+              {settings.aiProvider === 'groq' && (
+                <div>
+                  <label className="block text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2">Groq API Key</label>
+                  <input 
+                    type="password" 
+                    value={settings.groqApiKey} 
+                    onChange={e => setSettings({...settings, groqApiKey: e.target.value})} 
+                    placeholder="Paste Groq API key here..." 
+                    className="w-full p-2.5 border border-stone-200 rounded-lg outline-none focus:ring-2 focus:ring-stone-400 text-sm shadow-inner bg-stone-50" 
+                  />
+                  <p className="text-xs text-stone-400 mt-2 font-medium">Required for Magic Polish and Smart Import. Embeddings will use local engine.</p>
+                </div>
+              )}
               <div className="border-t border-stone-100 pt-4">
                 <label className="flex items-center gap-3 text-sm font-bold text-stone-700 cursor-pointer">
                   <input 
