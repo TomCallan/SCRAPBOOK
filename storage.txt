@@ -1,0 +1,6 @@
+<data>\assets
+    - collection of every asset the user uploads - if an asset is uploaded twice do not save twice
+
+<data>\notebooks
+    - every notebook the user saves as a .md files
+    - markup + asset refs saved in .json

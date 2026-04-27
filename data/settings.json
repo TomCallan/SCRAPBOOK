@@ -1,0 +1,7 @@
+{
+  "aiProvider": "local",
+  "aiModel": "gemini-2.5-flash-preview-09-2025",
+  "geminiApiKey": "",
+  "groqApiKey": "",
+  "enableVectorSearch": true
+}
